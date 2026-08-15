@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply bg-[#0D0D0E] text-slate-200 antialiased selection:bg-[#BA963E] selection:text-black;
+  }
+}
+
+/* Custom Scrollbar for Luxury Look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #111112;
+}
+::-webkit-scrollbar-thumb {
+  background: #BA963E;
+  border-radius: 3px;
+}
