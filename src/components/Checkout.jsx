@@ -23,6 +23,9 @@ export default function Checkout({ darkMode, cartItems, totalBudget, bankDetails
     isOtpVerified: false
   });
 
+  // Modal State for Luxury Order Confirmation Popup
+  const [placedOrderModal, setPlacedOrderModal] = useState(null);
+
   // OTP Generator & Validation
   const [generatedOtp, setGeneratedOtp] = useState('');
 
@@ -81,7 +84,7 @@ export default function Checkout({ darkMode, cartItems, totalBudget, bankDetails
       ? `Advance Delivery Fee (PKR ${deliveryFee}) + COD` 
       : '100% Full Online Advance';
 
-    // Integrated Order Object with Anti-Fake Data
+    // Integrated Order Object
     const newOrderObj = {
       id: generatedId,
       orderId: generatedId,
@@ -89,10 +92,11 @@ export default function Checkout({ darkMode, cartItems, totalBudget, bankDetails
       courier: "TCS Express",
       trackingCode: generatedId,
       total: finalPayableTotal,
+      totalAmount: finalPayableTotal,
       itemTotal: totalBudget,
       deliveryCharges: deliveryFee,
       paymentType: paymentTypeLabel,
-      paymentStatus: 'Pending Admin Approval', // Admin will approve after checking SS
+      paymentStatus: 'Pending Admin Approval',
       otpVerified: formData.isOtpVerified,
       receiptScreenshot: formData.receiptScreenshot,
       status: 'Pending',
@@ -105,13 +109,17 @@ export default function Checkout({ darkMode, cartItems, totalBudget, bankDetails
       items: cartItems
     };
 
-    // Broadcast live event across Localhost Ports (3000 -> 3001)
+    // Broadcast live event across Localhost Ports & Unified Key
     try {
-      const existingOrders = JSON.parse(localStorage.getItem('ma_customer_orders') || '[]');
-      const updatedOrders = [newOrderObj, ...existingOrders];
-      localStorage.setItem('ma_customer_orders', JSON.stringify(updatedOrders));
+      // 1. Unified Key for Tracker & Admin Sync
+      const allOrders = JSON.parse(localStorage.getItem('ma_all_customer_orders') || '[]');
+      const updatedAllOrders = [newOrderObj, ...allOrders];
+      localStorage.setItem('ma_all_customer_orders', JSON.stringify(updatedAllOrders));
+
+      // 2. Legacy Key Fallback
+      localStorage.setItem('ma_customer_orders', JSON.stringify(updatedAllOrders));
       
-      // Trigger Storage Event Signal for Admin Panel
+      // Trigger Storage Event Signal for Admin Panel Realtime Broadcast
       window.dispatchEvent(new Event('storage'));
     } catch (err) {
       console.error("Failed to sync order:", err);
@@ -121,7 +129,8 @@ export default function Checkout({ darkMode, cartItems, totalBudget, bankDetails
       onOrderPlaced(newOrderObj);
     }
 
-    alert(`🎯 Order Successfully Placed!\n\nOrder ID: ${generatedId}\nAdmin panel ko Live Signal bhej diya gaya hai. Verification ke baad order dispatch kar diya jayega!`);
+    // Open Luxury Success Modal
+    setPlacedOrderModal(newOrderObj);
 
     // Reset Form State
     setFormData({
@@ -283,6 +292,53 @@ export default function Checkout({ darkMode, cartItems, totalBudget, bankDetails
           Confirm & Submit Order
         </button>
       </form>
+
+      {/* LUXURY ORDER SUCCESS MODAL */}
+      {placedOrderModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#121214] border border-[#BA963E] p-6 md:p-8 rounded-3xl max-w-md w-full text-center space-y-5 shadow-2xl relative text-white">
+            
+            <div className="w-16 h-16 bg-[#BA963E]/20 text-[#E5C158] rounded-full flex items-center justify-center mx-auto text-3xl border border-[#BA963E]/40">
+              🎯
+            </div>
+
+            <div className="space-y-1">
+              <h2 className="text-lg font-serif font-bold text-[#E5C158] tracking-widest uppercase">
+                Order Successfully Placed!
+              </h2>
+              <p className="text-xs text-gray-400">
+                Aapka order system mein register kar liya gaya hai.
+              </p>
+            </div>
+
+            <div className="bg-[#1A1A1D] border border-white/5 p-4 rounded-2xl text-left space-y-2 font-mono text-xs">
+              <div className="flex justify-between border-b border-white/5 pb-2">
+                <span className="text-gray-400">Order ID:</span>
+                <span className="text-[#E5C158] font-bold">{placedOrderModal.id}</span>
+              </div>
+              <div className="flex justify-between border-b border-white/5 pb-2">
+                <span className="text-gray-400">Grand Total:</span>
+                <span className="text-white font-bold">{placedOrderModal.total} PKR</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Live Status:</span>
+                <span className="text-amber-400 font-bold">Pending Verification</span>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-gray-400 leading-relaxed">
+              Admin panel ko <strong className="text-white">Live Signal</strong> bhej diya gaya hai. Verification ke baad order dispatch kar diya jayega!
+            </p>
+
+            <button
+              onClick={() => setPlacedOrderModal(null)}
+              className="w-full bg-[#BA963E] text-black font-bold py-3 rounded-xl text-xs uppercase tracking-wider hover:bg-[#E5C158] transition-all cursor-pointer shadow-lg"
+            >
+              Close & Continue 🛍️
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

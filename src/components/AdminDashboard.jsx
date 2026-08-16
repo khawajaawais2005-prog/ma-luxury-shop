@@ -27,7 +27,6 @@ export default function AdminDashboard({
       if (e.key === 'ma_customer_orders' || !e.key) {
         const freshOrders = JSON.parse(localStorage.getItem('ma_customer_orders') || '[]');
         
-        // Play Audio Alert if new order arrives
         if (freshOrders.length > orders.length) {
           try {
             const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -36,14 +35,13 @@ export default function AdminDashboard({
             osc.connect(gain);
             gain.connect(audioCtx.destination);
             osc.type = 'sine';
-            osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5 Note
+            osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
             gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
             osc.start();
             osc.stop(audioCtx.currentTime + 0.3);
           } catch (err) {
             console.log("Audio alert blocked by browser settings.");
           }
-
           if (addNotification) {
             addNotification("🚨 NEW ORDER RECEIVED!", `Order #${freshOrders[0]?.id || 'NEW'} placed live!`, "order");
           }
@@ -51,7 +49,6 @@ export default function AdminDashboard({
         setOrders(freshOrders);
       }
     };
-
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, [orders.length, addNotification]);
@@ -62,12 +59,11 @@ export default function AdminDashboard({
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [viewScreenshot, setViewScreenshot] = useState(null);
 
-  // Auto Save Orders on Change
+  // Auto Save Orders & Complaints
   useEffect(() => {
     localStorage.setItem('ma_customer_orders', JSON.stringify(orders));
   }, [orders]);
 
-  // Auto Save Complaints on Change
   useEffect(() => {
     localStorage.setItem('ma_customer_complaints', JSON.stringify(complaints));
   }, [complaints]);
@@ -123,23 +119,38 @@ export default function AdminDashboard({
     }
   };
 
+  // NEW PRODUCT STATE WITH MULTI-IMAGE, SIZES, COLORS & STORE ADDRESS
   const [newProduct, setNewProduct] = useState({
     name: '',
     originalPrice: '',
     salePrice: '',
     isOnSale: false,
     saleLabel: 'Special Sale',
-    image: ''
+    images: [],
+    sizes: 'S, M, L, XL',
+    colors: 'Black, Brown, Gold',
+    storeAddress: companyAddress || ''
   });
 
   const [tempPassword, setTempPassword] = useState('');
 
-  const handleImageUpload = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const internalGalleryUrl = URL.createObjectURL(file);
-      setNewProduct({ ...newProduct, image: internalGalleryUrl });
+  // MULTIPLE IMAGES UPLOAD HANDLER
+  const handleMultipleImageUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length > 0) {
+      const newUrls = files.map(file => URL.createObjectURL(file));
+      setNewProduct(prev => ({
+        ...prev,
+        images: [...prev.images, ...newUrls]
+      }));
     }
+  };
+
+  const removeSelectedImage = (indexToRemove) => {
+    setNewProduct(prev => ({
+      ...prev,
+      images: prev.images.filter((_, idx) => idx !== indexToRemove)
+    }));
   };
 
   const triggerGallerySelector = () => {
@@ -165,6 +176,7 @@ export default function AdminDashboard({
     let confirmMessage = `In "${currentProductName}", change [${field}] to "${val}" live on storefront?`;
     let notifTitle = "■ Inventory Managed";
     let notifMessage = `Product "${currentProductName}" updated: [${field}] -> ${val}`;
+    
     if (field === 'isOnSale') {
       confirmMessage = val
         ? `■ DISCOUNT ALERT:\nAre you sure you want to activate SALE on "${currentProductName}"?`
@@ -174,21 +186,35 @@ export default function AdminDashboard({
         ? `"${currentProductName}" is now on ACTIVE SALE status!`
         : `"${currentProductName}" returned to standard pricing.`;
     }
+
     if (window.confirm(`■ FINANCIAL CONTROL DIALOG:\n${confirmMessage}`)) {
-      setProducts(products.map(p => p.id === id ? { ...p, [field]: val } : p));
+      setProducts(products.map(p => {
+        if (p.id === id) {
+          if (field === 'sizes' || field === 'colors') {
+            const arr = typeof val === 'string' ? val.split(',').map(s => s.trim()).filter(Boolean) : val;
+            return { ...p, [field]: arr };
+          }
+          return { ...p, [field]: val };
+        }
+        return p;
+      }));
       if (addNotification) addNotification(notifTitle, notifMessage, field === 'isOnSale' && val ? "order" : "info");
     }
   };
 
   const handleAddProduct = (e) => {
     e.preventDefault();
-    if (!newProduct.image) {
-      alert("■■ Please upload a product image from your Gallery first!");
+    if (!newProduct.images || newProduct.images.length === 0) {
+      alert("■■ Please upload at least one product image!");
       return;
     }
     if (!window.confirm(`■ PUBLISH SHIELD:\nDo you confirm injecting "${newProduct.name}" into the live catalog grid?`)) {
       return;
     }
+
+    const sizesArray = newProduct.sizes.split(',').map(s => s.trim()).filter(Boolean);
+    const colorsArray = newProduct.colors.split(',').map(c => c.trim()).filter(Boolean);
+
     const createdItem = {
       id: Date.now(),
       name: newProduct.name,
@@ -196,13 +222,32 @@ export default function AdminDashboard({
       salePrice: newProduct.salePrice ? Number(newProduct.salePrice) : Number(newProduct.originalPrice),
       isOnSale: newProduct.isOnSale,
       saleLabel: newProduct.saleLabel,
-      image: newProduct.image
+      image: newProduct.images[0], // Main Fallback Image
+      images: newProduct.images,   // Array of Images for Gallery
+      sizes: sizesArray.length > 0 ? sizesArray : ['M'],
+      colors: colorsArray.length > 0 ? colorsArray : ['Default'],
+      storeAddress: newProduct.storeAddress || companyAddress
     };
+
     setProducts([...products, createdItem]);
     if (addNotification) addNotification("■ New Asset Live", `"${newProduct.name}" has been published into the public catalog.`, "info");
-    setNewProduct({ name: '', originalPrice: '', salePrice: '', isOnSale: false, saleLabel: 'Special Sale', image: '' });
-    document.getElementById('gallery-upload-input').value = '';
-    alert("■ Product published live!");
+    
+    setNewProduct({
+      name: '',
+      originalPrice: '',
+      salePrice: '',
+      isOnSale: false,
+      saleLabel: 'Special Sale',
+      images: [],
+      sizes: 'S, M, L, XL',
+      colors: 'Black, Brown, Gold',
+      storeAddress: companyAddress || ''
+    });
+    
+    if (document.getElementById('gallery-upload-input')) {
+      document.getElementById('gallery-upload-input').value = '';
+    }
+    alert("■ Product published live with all variants & gallery!");
   };
 
   const handleDeleteProduct = (id, productName) => {
@@ -301,8 +346,6 @@ export default function AdminDashboard({
                 </button>
               </div>
             </h2>
-
-            {/* SEARCH, FILTER & BULK ACTION BAR */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
               <input
                 type="text"
@@ -334,7 +377,6 @@ export default function AdminDashboard({
               </select>
             </div> 
           </div>
-
           <div className="space-y-3">
             {filteredOrders.length === 0 ? (
               <p className="text-gray-500 text-center py-4">No matching orders found.</p>
@@ -353,9 +395,7 @@ export default function AdminDashboard({
                     <p className="text-gray-300">Courier: <span className="text-white font-bold">{ord.courier}</span> • Tracking: <span className="font-mono text-[#E5C158]">{ord.trackingCode}</span></p>
                     <p className="text-white font-bold">Total: PKR {ord.total?.toLocaleString()} {ord.paymentType && <span className="text-[10px] text-amber-400">({ord.paymentType})</span>}</p>
                   </div>
-
                   <div className="flex flex-wrap items-center gap-2">
-                    {/* VIEW PAYMENT SCREENSHOT BUTTON */}
                     {ord.receiptScreenshot && (
                       <button
                         onClick={() => setViewScreenshot(ord.receiptScreenshot)}
@@ -364,15 +404,12 @@ export default function AdminDashboard({
                         🔍 View Receipt SS
                       </button>
                     )}
-
-                    {/* PRINT INVOICE BUTTON */}
                     <button
                       onClick={() => setSelectedInvoice(ord)}
                       className="bg-[#BA963E]/10 border border-[#BA963E]/40 text-[#E5C158] hover:bg-[#BA963E] hover:text-black font-bold p-2 rounded-xl transition-all cursor-pointer text-xs"
                     >
                       ■ Print Invoice
                     </button>
-
                     <span className="text-gray-400">Status:</span>
                     <select
                       value={ord.status}
@@ -467,7 +504,7 @@ export default function AdminDashboard({
             <p className="text-[10px] text-gray-500">Current Key Active: <span className="text-[#E5C158] font-mono">{adminPassword}</span></p>
           </div>
 
-          {/* ADD PRODUCT & GALLERY */}
+          {/* ADD PRODUCT WITH MULTI-IMAGE, SIZES, COLORS & STORE ADDRESS */}
           <div className="bg-[#121214] p-6 rounded-3xl border border-white/5 space-y-4 shadow-xl">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-white/5 pb-3 gap-3">
               <h2 className="text-sm uppercase tracking-wider text-[#E5C158] font-bold">■ Add New Store Product</h2>
@@ -476,7 +513,7 @@ export default function AdminDashboard({
                 onClick={triggerGallerySelector}
                 className="bg-[#BA963E]/10 border border-[#BA963E]/40 text-[#E5C158] hover:bg-[#BA963E] hover:text-black transition-all px-4 py-2 rounded-xl text-xs font-bold uppercase cursor-pointer"
               >
-                ■ Choose Image From Gallery
+                ■ Upload Pictures (Multiple)
               </button>
             </div>
             <form onSubmit={handleAddProduct} className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -492,27 +529,67 @@ export default function AdminDashboard({
                 <label className="text-gray-400 block mb-1">Sale Price (PKR)</label>
                 <input type="number" placeholder="5500" value={newProduct.salePrice} onChange={(e) => setNewProduct({...newProduct, salePrice: e.target.value})} className="w-full bg-[#1A1A1D] border border-white/5 p-2.5 rounded-xl text-white focus:outline-none" />
               </div>
-              <div className="relative group">
-                <label className="text-gray-400 block mb-1">Product Image</label>
-                <div onClick={triggerGallerySelector} className="w-full bg-[#1A1A1D] border border-dashed border-white/10 hover:border-[#BA963E]/50 p-2.5 rounded-xl text-gray-400 text-center cursor-pointer flex items-center justify-center">
-                  <span className="text-[11px] text-gray-400">{newProduct.image ? "■ Change Selected Image" : "■ Browse Device Gallery"}</span>
-                </div>
-                <input id="gallery-upload-input" type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+
+              {/* SIZES INPUT */}
+              <div>
+                <label className="text-gray-400 block mb-1">Available Sizes (Comma separated)</label>
+                <input type="text" placeholder="S, M, L, XL" value={newProduct.sizes} onChange={(e) => setNewProduct({...newProduct, sizes: e.target.value})} className="w-full bg-[#1A1A1D] border border-white/5 p-2.5 rounded-xl text-white focus:outline-none" />
               </div>
+
+              {/* COLORS INPUT */}
+              <div>
+                <label className="text-gray-400 block mb-1">Available Colors (Comma separated)</label>
+                <input type="text" placeholder="Black, Brown, Tan" value={newProduct.colors} onChange={(e) => setNewProduct({...newProduct, colors: e.target.value})} className="w-full bg-[#1A1A1D] border border-white/5 p-2.5 rounded-xl text-white focus:outline-none" />
+              </div>
+
+              {/* DISPATCH ADDRESS FOR PRODUCT */}
+              <div>
+                <label className="text-gray-400 block mb-1">Warehouse / Dispatch Location</label>
+                <input type="text" placeholder="Lahore Hub / Karachi Warehouse" value={newProduct.storeAddress} onChange={(e) => setNewProduct({...newProduct, storeAddress: e.target.value})} className="w-full bg-[#1A1A1D] border border-white/5 p-2.5 rounded-xl text-white focus:outline-none" />
+              </div>
+
+              {/* MULTI IMAGE UPLOAD BOX */}
+              <div className="relative group md:col-span-2">
+                <label className="text-gray-400 block mb-1">Product Gallery Pictures (Select Multiple)</label>
+                <div onClick={triggerGallerySelector} className="w-full bg-[#1A1A1D] border border-dashed border-white/10 hover:border-[#BA963E]/50 p-2.5 rounded-xl text-gray-400 text-center cursor-pointer flex items-center justify-center">
+                  <span className="text-[11px] text-gray-400">
+                    {newProduct.images.length > 0 ? `■ ${newProduct.images.length} Image(s) Selected - Click to Add More` : "■ Click to Choose Multiple Images"}
+                  </span>
+                </div>
+                <input id="gallery-upload-input" type="file" accept="image/*" multiple onChange={handleMultipleImageUpload} className="hidden" />
+              </div>
+
               <div>
                 <label className="text-gray-400 block mb-1">Discount Tag Text</label>
                 <input type="text" value={newProduct.saleLabel} onChange={(e) => setNewProduct({...newProduct, saleLabel: e.target.value})} className="w-full bg-[#1A1A1D] border border-white/5 p-2.5 rounded-xl text-white focus:outline-none" />
               </div>
+
               <div className="flex items-center gap-3 pl-2 h-full pt-4 md:pt-0">
                 <input type="checkbox" id="directSale" checked={newProduct.isOnSale} onChange={(e) => setNewProduct({...newProduct, isOnSale: e.target.checked})} className="scale-125 accent-[#BA963E]" />
                 <label htmlFor="directSale" className="text-gray-300 font-medium cursor-pointer">Activate Discount Immediately</label>
               </div>
-              {newProduct.image && (
-                <div className="md:col-span-3 bg-black/40 p-3 rounded-2xl border border-white/5 flex items-center gap-4">
-                  <img src={newProduct.image} className="w-16 h-16 object-cover rounded-xl border border-[#BA963E]/40" alt="Preview" />
-                  <p className="text-[11px] text-emerald-400 font-bold">✓ Image successfully linked</p>
+
+              {/* PREVIEW MULTIPLE IMAGES THUMBNAILS */}
+              {newProduct.images.length > 0 && (
+                <div className="md:col-span-3 bg-black/40 p-3 rounded-2xl border border-white/5 space-y-2">
+                  <p className="text-[11px] text-emerald-400 font-bold">✓ {newProduct.images.length} Image(s) Linked to Product:</p>
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {newProduct.images.map((imgUrl, idx) => (
+                      <div key={idx} className="relative group shrink-0">
+                        <img src={imgUrl} className="w-16 h-16 object-cover rounded-xl border border-[#BA963E]/40" alt="Preview" />
+                        <button
+                          type="button"
+                          onClick={() => removeSelectedImage(idx)}
+                          className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[10px] w-5 h-5 rounded-full font-bold flex items-center justify-center hover:bg-red-700 shadow-md"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
+
               <div className="md:col-span-3 pt-2">
                 <button type="submit" className="w-full bg-[#BA963E] text-black font-bold py-3.5 rounded-xl hover:bg-[#E5C158] uppercase tracking-wider text-xs cursor-pointer shadow-md">
                   ■ Publish Product
@@ -555,35 +632,55 @@ export default function AdminDashboard({
             </div>
           </div>
 
-          {/* INVENTORY TABLE */}
+          {/* INVENTORY TABLE ENHANCED WITH VARIANTS & LOCATION EDIT */}
           <div className="bg-[#121214] p-5 rounded-3xl border border-white/5 space-y-4 shadow-xl">
             <h2 className="text-sm uppercase tracking-wider text-[#E5C158] font-bold border-b border-white/5 pb-2">■ Inventory Table</h2>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse min-w-[700px]">
+              <table className="w-full text-left text-xs border-collapse min-w-[900px]">
                 <thead>
                   <tr className="border-b border-white/10 text-gray-400">
                     <th className="py-2">Preview</th>
                     <th className="py-2">Product Name</th>
                     <th className="py-2">Price</th>
                     <th className="py-2">Sale Price</th>
-                    <th className="py-2">Discount Status</th>
+                    <th className="py-2">Sizes</th>
+                    <th className="py-2">Colors</th>
+                    <th className="py-2">Dispatch Address</th>
+                    <th className="py-2">Discount</th>
                     <th className="py-2 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
                   {products.map(p => (
                     <tr key={p.id}>
-                      <td className="py-3"><img src={p.image} className="w-10 h-10 object-cover rounded-lg border border-white/10" alt="" /></td>
-                      <td className="py-3"><input type="text" defaultValue={p.name} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'name', e.target.value, p.name)} className="bg-[#1A1A1D] text-white p-1.5 rounded-lg border border-white/5 w-full max-w-[160px]" /></td>
-                      <td className="py-3 font-mono"><input type="number" defaultValue={p.originalPrice} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'originalPrice', Number(e.target.value), p.name)} className="bg-[#1A1A1D] text-[#E5C158] font-bold p-1.5 border border-white/5 rounded-lg w-20" /> PKR</td>
-                      <td className="py-3 font-mono"><input type="number" defaultValue={p.salePrice} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'salePrice', Number(e.target.value), p.name)} className="bg-[#1A1A1D] text-red-400 font-bold p-1.5 border border-white/5 rounded-lg w-20" /> PKR</td>
                       <td className="py-3">
-                        <button onClick={() => handleProductChangeWithConfirmation(p.id, 'isOnSale', !p.isOnSale, p.name)} className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase border ${p.isOnSale ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-gray-500/10 border-white/10 text-gray-400'}`}>
-                          {p.isOnSale ? 'Active Sale' : 'Standard'}
+                        <img src={p.image || p.images?.[0]} className="w-10 h-10 object-cover rounded-lg border border-white/10" alt="" />
+                      </td>
+                      <td className="py-3">
+                        <input type="text" defaultValue={p.name} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'name', e.target.value, p.name)} className="bg-[#1A1A1D] text-white p-1.5 rounded-lg border border-white/5 w-full max-w-[140px]" />
+                      </td>
+                      <td className="py-3 font-mono">
+                        <input type="number" defaultValue={p.originalPrice} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'originalPrice', Number(e.target.value), p.name)} className="bg-[#1A1A1D] text-[#E5C158] font-bold p-1.5 border border-white/5 rounded-lg w-16" /> PKR
+                      </td>
+                      <td className="py-3 font-mono">
+                        <input type="number" defaultValue={p.salePrice} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'salePrice', Number(e.target.value), p.name)} className="bg-[#1A1A1D] text-red-400 font-bold p-1.5 border border-white/5 rounded-lg w-16" /> PKR
+                      </td>
+                      <td className="py-3">
+                        <input type="text" defaultValue={Array.isArray(p.sizes) ? p.sizes.join(', ') : p.sizes || ''} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'sizes', e.target.value, p.name)} className="bg-[#1A1A1D] text-gray-300 p-1.5 rounded-lg border border-white/5 w-24 text-[10px]" placeholder="S, M, L" />
+                      </td>
+                      <td className="py-3">
+                        <input type="text" defaultValue={Array.isArray(p.colors) ? p.colors.join(', ') : p.colors || ''} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'colors', e.target.value, p.name)} className="bg-[#1A1A1D] text-gray-300 p-1.5 rounded-lg border border-white/5 w-24 text-[10px]" placeholder="Red, Black" />
+                      </td>
+                      <td className="py-3">
+                        <input type="text" defaultValue={p.storeAddress || ''} onBlur={(e) => handleProductChangeWithConfirmation(p.id, 'storeAddress', e.target.value, p.name)} className="bg-[#1A1A1D] text-gray-300 p-1.5 rounded-lg border border-white/5 w-28 text-[10px]" placeholder="Warehouse Location" />
+                      </td>
+                      <td className="py-3">
+                        <button onClick={() => handleProductChangeWithConfirmation(p.id, 'isOnSale', !p.isOnSale, p.name)} className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase border ${p.isOnSale ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-gray-500/10 border-white/10 text-gray-400'}`}>
+                          {p.isOnSale ? 'Active' : 'Standard'}
                         </button>
                       </td>
                       <td className="py-3 text-center">
-                        <button onClick={() => handleDeleteProduct(p.id, p.name)} className="text-red-500 hover:bg-red-500/10 border border-red-500/20 px-2.5 py-1.5 rounded-lg font-bold uppercase text-[10px]">
+                        <button onClick={() => handleDeleteProduct(p.id, p.name)} className="text-red-500 hover:bg-red-500/10 border border-red-500/20 px-2 py-1 rounded-lg font-bold uppercase text-[10px]">
                           Delete
                         </button>
                       </td>
