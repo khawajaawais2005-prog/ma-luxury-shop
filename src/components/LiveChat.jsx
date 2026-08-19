@@ -1,394 +1,783 @@
-import React, { useState, useEffect, useRef } from 'react';
-
-export default function LiveChat({ 
-  isAdmin, 
-  darkMode, 
-  chatSessions, 
-  setChatSessions, 
-  onClose, 
-  addNotification,
-  // 🌟 NEW PROPS (Bina purana code tode naye features support karne ke liye)
-  isOpen: externalIsOpen,
-  autoOpenSession,
-  initialMessage
-}) {
-  // 💾 LOCALSTORAGE INITIALIZERS
-  const [localChatSessions, setLocalChatSessions] = useState(() => {
-    const saved = localStorage.getItem('ma_chat_sessions');
-    return saved ? JSON.parse(saved) : {};
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+ 
+// ============================================================================
+// MA PRODUCTS - LIVE CUSTOMER SUPPORT CHAT
+// ============================================================================
+// This component is intentionally self-contained so it can be dropped into
+// the existing project without removing the current storefront logic.
+//
+// Storage behavior:
+//   - Messages are persisted in localStorage.
+//   - BroadcastChannel + storage events make open tabs/windows update quickly.
+//   - A future server adapter can replace the storage functions without
+//     changing the chat UI.
+//
+// Important production note:
+//   localStorage is browser-local. For customer and admin on different devices,
+//   connect the marked persistence functions to the existing backend/database.
+//   The UI and data shape below are already designed for that upgrade.
+// ============================================================================
+ 
+const CHAT_STORAGE_KEY = 'ma_live_chat_sessions';
+const CHAT_CHANNEL_NAME = 'ma_live_chat_channel';
+const CUSTOMER_ID_KEY = 'ma_chat_customer_id';
+const MAX_FILE_SIZE = 8 * 1024 * 1024;
+ 
+const makeId = (prefix = 'ID') =>
+  `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+ 
+const getStableCustomerId = () => {
+  const existing = localStorage.getItem(CUSTOMER_ID_KEY);
+  if (existing) return existing;
+  const created = makeId('CUS');
+  localStorage.setItem(CUSTOMER_ID_KEY, created);
+  return created;
+};
+ 
+const readSessions = () => {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+ 
+const writeSessions = (sessions) => {
+  localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(sessions));
+};
+ 
+const formatTime = (timestamp) => {
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit'
   });
-
-  const [activeSession, setActiveSession] = useState(null); 
-  const [customerName, setCustomerName] = useState(""); 
-  const [isRegistered, setIsRegistered] = useState(false);
-  const [typedMessage, setTypedMessage] = useState("");
-  const [searchTerm, setSearchTerm] = useState(""); 
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [isOpen, setIsOpen] = useState(externalIsOpen ?? true);
-
-  const [resolvedSessions, setResolvedSessions] = useState(() => {
-    const saved = localStorage.getItem('ma_resolved_sessions');
-    return saved ? JSON.parse(saved) : {};
-  }); 
-
-  const [selectedFile, setSelectedFile] = useState(null); 
-  const fileInputRef = useRef(null);
-  const chatEndRef = useRef(null);
-
-  // Sync external open state if controlled from parent (e.g. Order Placed)
+};
+ 
+const formatDate = (timestamp) => {
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleDateString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
+};
+ 
+const createSession = (customerId) => ({
+  id: makeId('CHAT'),
+  customerId,
+  customerName: localStorage.getItem('ma_customer_name') || 'Customer',
+  status: 'open',
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+  unreadForAdmin: 0,
+  unreadForCustomer: 0,
+  messages: []
+});
+ 
+const createMessage = ({ sender, text = '', attachment = null, product = null }) => ({
+  id: makeId('MSG'),
+  sender,
+  text: text.trim(),
+  attachment,
+  product,
+  createdAt: Date.now()
+});
+ 
+const getLastMessage = (session) => {
+  const messages = session?.messages || [];
+  return messages.length ? messages[messages.length - 1] : null;
+};
+ 
+const getSessionPreview = (session) => {
+  const last = getLastMessage(session);
+  if (!last) return 'No messages yet';
+  if (last.text) return last.text;
+  if (last.product) return 'Product shared';
+  if (last.attachment?.kind === 'image') return 'Image sent';
+  if (last.attachment?.kind === 'video') return 'Video sent';
+  return 'Attachment sent';
+};
+ 
+export default function LiveChat({
+  isOpen = true,
+  isAdmin = false,
+  darkMode = true,
+  products = [],
+  customerId,
+  onClose,
+  roboticQuestions = [],
+  roboticAnswers = {}
+}) {
+  const resolvedCustomerId = customerId || getStableCustomerId();
+  const [sessions, setSessions] = useState(() => readSessions());
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [messageText, setMessageText] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [search, setSearch] = useState('');
+  const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
+  const [isFaqMenuOpen, setIsFaqMenuOpen] = useState(false);
+  const [isProductPickerOpen, setIsProductPickerOpen] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [adminTab, setAdminTab] = useState('active');
+  const [isTyping, setIsTyping] = useState(false);
+  const [customerName, setCustomerName] = useState(() => localStorage.getItem('ma_customer_name') || 'Customer');
+  const [showCustomerNameEditor, setShowCustomerNameEditor] = useState(false);
+  const messagesEndRef = useRef(null);
+  const channelRef = useRef(null);
+ 
+  const panelClass = darkMode
+    ? 'bg-[#101011] text-white border-white/10'
+    : 'bg-white text-gray-900 border-gray-200';
+ 
+  const inputClass = darkMode
+    ? 'bg-[#1A1A1D] border-white/10 text-white placeholder:text-gray-500'
+    : 'bg-gray-100 border-gray-200 text-gray-900 placeholder:text-gray-500';
+ 
+  // --------------------------------------------------------------------------
+  // LIVE STORAGE / CHANNEL SYNC
+  // --------------------------------------------------------------------------
   useEffect(() => {
-    if (externalIsOpen !== undefined) {
-      setIsOpen(externalIsOpen);
+    const refresh = () => setSessions(readSessions());
+ 
+    const handleStorage = (event) => {
+      if (event.key === CHAT_STORAGE_KEY) refresh();
+    };
+ 
+    window.addEventListener('storage', handleStorage);
+ 
+    if ('BroadcastChannel' in window) {
+      channelRef.current = new BroadcastChannel(CHAT_CHANNEL_NAME);
+      channelRef.current.onmessage = refresh;
     }
-  }, [externalIsOpen]);
-
-  // Handle Auto-Session & Order Message Injection on Order Confirm
+ 
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      channelRef.current?.close();
+      channelRef.current = null;
+    };
+  }, []);
+ 
   useEffect(() => {
-    if (autoOpenSession) {
-      setCustomerName(autoOpenSession);
-      setActiveSession(autoOpenSession);
-      setIsRegistered(true);
-      setIsOpen(true);
-
-      if (initialMessage) {
-        sendMessageStream(
-          typeof initialMessage === 'object' ? initialMessage.text : initialMessage, 
-          'Customer', 
-          autoOpenSession, 
-          null, 
-          true // Mark as Order Message
-        );
-      }
-    }
-  }, [autoOpenSession, initialMessage]);
-
-  // Sync to local storage
-  useEffect(() => {
-    localStorage.setItem('ma_chat_sessions', JSON.stringify(chatSessions || localChatSessions));
-  }, [chatSessions, localChatSessions]);
-
-  useEffect(() => {
-    localStorage.setItem('ma_resolved_sessions', JSON.stringify(resolvedSessions));
-  }, [resolvedSessions]);
-
-  // Combined sessions target
-  const currentChatData = chatSessions || localChatSessions;
-  const sessionsList = Object.keys(currentChatData)
-    .filter(name => !resolvedSessions[name])
-    .filter(name => name.toLowerCase().includes(searchTerm.toLowerCase()));
-
-  // Auto Scroll to bottom on new messages
-  useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [currentChatData, activeSession]);
-
-  const customerFAQs = [
-    { q: "What is your delivery time?", a: "Standard delivery takes 3 to 5 business days across Pakistan." },
-    { q: "What is your return policy?", a: "We offer a 7-day hassle-free return policy for exchange or store credit." },
-    { q: "Are your luxury products authentic?", a: "Yes, 100% genuine luxury curation with premium quality assurance." }
-  ];
-
-  // Image Upload Reader
-  const handleImageAttach = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setSelectedFile(reader.result);
-      };
-      reader.readAsDataURL(file);
+    if (!isOpen) return;
+    const timer = setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 20);
+    return () => clearTimeout(timer);
+  }, [isOpen, activeSessionId, sessions, isTyping]);
+ 
+  const broadcast = () => {
+    try {
+      channelRef.current?.postMessage({ type: 'chat-updated', at: Date.now() });
+    } catch {
+      // BroadcastChannel is optional. localStorage remains the source of truth.
     }
   };
-
-  const initCustomerSession = (e) => {
-    e.preventDefault();
-    const formattedName = customerName.trim();
-    if (!formattedName) return;
-    
-    setActiveSession(formattedName);
-    setIsRegistered(true);
-
-    const initStructure = (prev) => {
-      const safePrev = prev || {};
-      if (!safePrev[formattedName]) {
-        return { ...safePrev, [formattedName]: [] };
+ 
+  const persist = (nextSessions) => {
+    setSessions(nextSessions);
+    writeSessions(nextSessions);
+    broadcast();
+  };
+ 
+  // --------------------------------------------------------------------------
+  // CUSTOMER SESSION SELECTION
+  // --------------------------------------------------------------------------
+  const customerSessions = useMemo(() => {
+    return Object.values(sessions)
+      .filter(session => session.customerId === resolvedCustomerId)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [sessions, resolvedCustomerId]);
+ 
+  const customerActiveSession = useMemo(() => {
+    return customerSessions.find(session => session.status === 'open') || null;
+  }, [customerSessions]);
+ 
+  const adminSessions = useMemo(() => {
+    const list = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
+    return list.filter(session => {
+      const matchesTab = adminTab === 'active' ? session.status === 'open' : session.status === 'resolved';
+      const q = search.toLowerCase().trim();
+      const matchesSearch = !q ||
+        session.id.toLowerCase().includes(q) ||
+        session.customerId.toLowerCase().includes(q) ||
+        String(session.customerName || '').toLowerCase().includes(q);
+      return matchesTab && matchesSearch;
+    });
+  }, [sessions, adminTab, search]);
+ 
+  const activeSession = useMemo(() => {
+    if (isAdmin) {
+      if (activeSessionId && sessions[activeSessionId]) return sessions[activeSessionId];
+      return adminSessions[0] || null;
+    }
+    if (activeSessionId && sessions[activeSessionId] && sessions[activeSessionId].customerId === resolvedCustomerId) {
+      return sessions[activeSessionId];
+    }
+    return customerActiveSession;
+  }, [isAdmin, activeSessionId, sessions, adminSessions, resolvedCustomerId, customerActiveSession]);
+ 
+  // --------------------------------------------------------------------------
+  // CREATE / SELECT SESSION
+  // --------------------------------------------------------------------------
+  const ensureCustomerSession = () => {
+    const current = customerSessions.find(session => session.status === 'open');
+    if (current) {
+      setActiveSessionId(current.id);
+      return current;
+    }
+ 
+    const created = createSession(resolvedCustomerId);
+    created.customerName = customerName || 'Customer';
+    const next = { ...sessions, [created.id]: created };
+    persist(next);
+    setActiveSessionId(created.id);
+    return created;
+  };
+ 
+  const openAdminSession = (sessionId) => {
+    setActiveSessionId(sessionId);
+    const selected = sessions[sessionId];
+    if (!selected) return;
+    const next = {
+      ...sessions,
+      [sessionId]: { ...selected, unreadForAdmin: 0 }
+    };
+    persist(next);
+  };
+ 
+  useEffect(() => {
+    if (!isAdmin && isOpen && !activeSessionId && customerActiveSession) {
+      setActiveSessionId(customerActiveSession.id);
+    }
+    if (isAdmin && isOpen && !activeSessionId && adminSessions[0]) {
+      setActiveSessionId(adminSessions[0].id);
+    }
+  }, [isAdmin, isOpen, activeSessionId, customerActiveSession, adminSessions]);
+ 
+  // --------------------------------------------------------------------------
+  // CUSTOMER NAME
+  // --------------------------------------------------------------------------
+  const saveCustomerName = () => {
+    const safeName = customerName.trim() || 'Customer';
+    setCustomerName(safeName);
+    localStorage.setItem('ma_customer_name', safeName);
+    if (!activeSession) return;
+    const next = {
+      ...sessions,
+      [activeSession.id]: {
+        ...activeSession,
+        customerName: safeName,
+        updatedAt: Date.now()
       }
-      return safePrev;
+    };
+    persist(next);
+    setShowCustomerNameEditor(false);
+  };
+ 
+  // --------------------------------------------------------------------------
+  // ATTACHMENT HANDLING
+  // --------------------------------------------------------------------------
+  const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+ 
+  const handleFileSelected = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+ 
+    if (file.size > MAX_FILE_SIZE) {
+      alert('Please choose a file smaller than 8 MB.');
+      return;
+    }
+ 
+    const isImage = file.type.startsWith('image/');
+    const isVideo = file.type.startsWith('video/');
+    if (!isImage && !isVideo) {
+      alert('Only image and video files can be shared in this chat.');
+      return;
+    }
+ 
+    setIsSending(true);
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      setSelectedFile({
+        kind: isImage ? 'image' : 'video',
+        name: file.name,
+        mimeType: file.type,
+        size: file.size,
+        dataUrl
+      });
+      setIsAttachmentMenuOpen(false);
+    } catch {
+      alert('The selected file could not be prepared.');
+    } finally {
+      setIsSending(false);
+    }
+  };
+ 
+  const clearAttachments = () => {
+    setSelectedFile(null);
+    setSelectedProduct(null);
+  };
+ 
+  // --------------------------------------------------------------------------
+  // SEND MESSAGE
+  // --------------------------------------------------------------------------
+  const sendMessage = () => {
+    const text = messageText.trim();
+    if (!text && !selectedFile && !selectedProduct) return;
+ 
+    const session = isAdmin ? activeSession : (activeSession || ensureCustomerSession());
+    if (!session) return;
+ 
+    if (session.status === 'resolved') {
+      if (isAdmin) {
+        alert('This conversation is already resolved. Re-open it from the customer side to create a new active conversation.');
+      } else {
+        alert('This conversation has been resolved. Start a new conversation to contact support again.');
+      }
+      return;
+    }
+ 
+    const sender = isAdmin ? 'admin' : 'customer';
+    const message = createMessage({
+      sender,
+      text,
+      attachment: selectedFile,
+      product: selectedProduct
+    });
+ 
+    const nextSession = {
+      ...session,
+      updatedAt: message.createdAt,
+      messages: [...(session.messages || []), message],
+      unreadForAdmin: sender === 'customer' ? (session.unreadForAdmin || 0) + 1 : 0,
+      unreadForCustomer: sender === 'admin' ? (session.unreadForCustomer || 0) + 1 : 0
+    };
+ 
+    const next = { ...sessions, [session.id]: nextSession };
+    persist(next);
+    setActiveSessionId(session.id);
+    setMessageText('');
+    clearAttachments();
+    setIsAttachmentMenuOpen(false);
+    setIsProductPickerOpen(false);
+  };
+ 
+  const handleComposerKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      sendMessage();
+    }
+  };
+ 
+  // --------------------------------------------------------------------------
+  // QUICK Q&A / ROBOT ASSISTANT
+  // Questions are stored as normal chat messages so the conversation reads
+  // naturally and the admin can see exactly what the customer asked.
+  // --------------------------------------------------------------------------
+  const askQuickQuestion = (question) => {
+    const answer = roboticAnswers?.[question];
+    if (!question || !answer) return;
+
+    const session = activeSession || ensureCustomerSession();
+    if (!session || session.status === 'resolved') return;
+
+    const questionMessage = createMessage({
+      sender: 'customer',
+      text: question
+    });
+
+    const answerMessage = {
+      ...createMessage({
+        sender: 'bot',
+        text: answer
+      }),
+      botForQuestion: question
     };
 
-    if (setChatSessions) setChatSessions(prev => initStructure(prev));
-    setLocalChatSessions(prev => initStructure(prev));
+    const nextSession = {
+      ...session,
+      updatedAt: answerMessage.createdAt,
+      messages: [...(session.messages || []), questionMessage, answerMessage],
+      unreadForAdmin: (session.unreadForAdmin || 0) + 1
+    };
+
+    persist({ ...sessions, [session.id]: nextSession });
+    setActiveSessionId(session.id);
+    setIsFaqMenuOpen(false);
   };
 
-  const sendMessageStream = (textMsg, senderType, sessionTarget, imageMedia = null, isOrderMsg = false) => {
-    const currentTimeString = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const newMsgObj = { 
-      sender: senderType, 
-      text: textMsg, 
-      image: imageMedia, 
-      timestamp: currentTimeString,
-      isOrderMessage: isOrderMsg
+  // --------------------------------------------------------------------------
+  // RESOLVE / REOPEN
+  // --------------------------------------------------------------------------
+  const resolveSession = (sessionId) => {
+    const session = sessions[sessionId];
+    if (!session) return;
+ 
+    const systemMessage = createMessage({
+      sender: 'system',
+      text: 'Support marked this conversation as resolved.'
+    });
+ 
+    const nextSession = {
+      ...session,
+      status: 'resolved',
+      updatedAt: Date.now(),
+      unreadForAdmin: 0,
+      unreadForCustomer: 0,
+      resolvedAt: Date.now(),
+      messages: [...(session.messages || []), systemMessage]
     };
-
-    const updateStructure = (prev) => {
-      const safePrev = prev || {};
-      const currentLogs = safePrev[sessionTarget] ? [...safePrev[sessionTarget]] : [];
-      return {
-        ...safePrev,
-        [sessionTarget]: [...currentLogs, newMsgObj]
-      };
+ 
+    persist({ ...sessions, [sessionId]: nextSession });
+    setActiveSessionId(null);
+  };
+ 
+  const reopenSession = (sessionId) => {
+    const session = sessions[sessionId];
+    if (!session) return;
+    const reopened = {
+      ...session,
+      status: 'open',
+      updatedAt: Date.now(),
+      resolvedAt: null,
+      unreadForAdmin: 0,
+      unreadForCustomer: 0
     };
-
-    if (setChatSessions) setChatSessions(prev => updateStructure(prev));
-    setLocalChatSessions(prev => updateStructure(prev));
-
-    // Increase unread count if widget is closed and admin sends message
-    if (!isOpen && (senderType === 'admin' || senderType === 'Admin')) {
-      setUnreadCount(prev => prev + 1);
-    }
-
-    if (addNotification) {
-      addNotification(
-        senderType.toLowerCase() === 'admin' ? "💬 Admin Message Sent" : "📩 Customer Message",
-        `New activity in ${sessionTarget}'s chat session.`,
-        "info"
+    persist({ ...sessions, [sessionId]: reopened });
+    setActiveSessionId(sessionId);
+    setAdminTab('active');
+  };
+ 
+  // --------------------------------------------------------------------------
+  // PRODUCT SHARING
+  // --------------------------------------------------------------------------
+  const productOptions = products.slice(0, 30);
+ 
+  const chooseProduct = (product) => {
+    setSelectedProduct({
+      id: product.id,
+      name: product.name,
+      image: product.image,
+      price: product.isOnSale ? Number(product.salePrice) : Number(product.originalPrice),
+      category: product.category,
+      isOnSale: Boolean(product.isOnSale)
+    });
+    setIsProductPickerOpen(false);
+    setIsAttachmentMenuOpen(false);
+  };
+ 
+  // --------------------------------------------------------------------------
+  // RENDER HELPERS
+  // --------------------------------------------------------------------------
+  const renderAttachment = (attachment) => {
+    if (!attachment) return null;
+ 
+    if (attachment.kind === 'image') {
+      return (
+        <a href={attachment.dataUrl} target="_blank" rel="noreferrer" className="block mt-2">
+          <img src={attachment.dataUrl} alt={attachment.name || 'Shared image'} className="max-w-[220px] max-h-[260px] rounded-xl object-cover border border-white/10" />
+        </a>
       );
     }
-  };
-
-  const dispatchMessage = (e) => {
-    e.preventDefault();
-    if (!typedMessage.trim() && !selectedFile) return;
-
-    const currentActive = isAdmin ? activeSession : activeSession || customerName.trim();
-    if (!currentActive) return;
-
-    sendMessageStream(typedMessage, isAdmin ? 'Admin' : 'Customer', currentActive, selectedFile);
-    setTypedMessage("");
-    setSelectedFile(null); 
-  };
-
-  const handleFAQClick = (faq) => {
-    const sessionTag = activeSession || customerName.trim();
-    if (!sessionTag) return;
-    
-    sendMessageStream(faq.q, 'Customer', sessionTag);
-    setTimeout(() => {
-      sendMessageStream(faq.a, 'Admin', sessionTag);
-    }, 400);
-  };
-
-  const handleOpenChat = (name) => {
-    setActiveSession(name);
-  };
-
-  const handleResolveIssue = () => {
-    if (!activeSession) return;
-    if (window.confirm(`⚠️ RESOLVE TICKET:\nClose session for "${activeSession}"?`)) {
-      setResolvedSessions(prev => ({ ...prev, [activeSession]: true }));
-      setActiveSession(null);
-      if (addNotification) {
-        addNotification("✅ Ticket Closed", "Chat session resolved successfully.", "info");
-      }
+ 
+    if (attachment.kind === 'video') {
+      return (
+        <video controls className="max-w-[240px] max-h-[260px] rounded-xl mt-2 border border-white/10">
+          <source src={attachment.dataUrl} type={attachment.mimeType || 'video/mp4'} />
+        </video>
+      );
     }
+ 
+    return null;
+  };
+ 
+  const renderProductCard = (product, compact = false) => {
+    if (!product) return null;
+    return (
+      <div className={`mt-2 rounded-xl border border-white/10 overflow-hidden ${darkMode ? 'bg-black/20' : 'bg-white/70'} ${compact ? 'max-w-[220px]' : 'max-w-[260px]'}`}>
+        {product.image && <img src={product.image} alt={product.name} className="w-full h-28 object-cover" />}
+        <div className="p-2.5">
+          <p className="font-bold text-xs">{product.name}</p>
+          <p className="text-[10px] opacity-60">{product.category || 'Product'}</p>
+          <p className="font-mono text-[#E5C158] font-bold mt-1">PKR {Number(product.price || 0).toLocaleString()}</p>
+        </div>
+      </div>
+    );
+  };
+ 
+  const renderMessage = (message) => {
+    const isMine = message.sender === (isAdmin ? 'admin' : 'customer');
+    const isSystem = message.sender === 'system';
+    const isBot = message.sender === 'bot';
+
+    if (isSystem) {
+      return (
+        <div key={message.id} className="flex justify-center my-3">
+          <span className="text-[9px] px-3 py-1 rounded-full bg-white/5 border border-white/10 text-gray-400">{message.text}</span>
+        </div>
+      );
+    }
+
+    return (
+      <div key={message.id} className={`flex ${isMine ? 'justify-end' : 'justify-start'} mb-2`}>
+        <div className={`max-w-[82%] rounded-2xl px-3 py-2 shadow-sm ${
+          isMine
+            ? 'bg-[#BA963E] text-black rounded-br-md'
+            : isBot
+              ? (darkMode ? 'bg-[#151A1B] text-white border border-[#BA963E]/30 rounded-bl-md' : 'bg-amber-50 text-gray-900 border border-amber-200 rounded-bl-md')
+              : darkMode
+                ? 'bg-[#202023] text-white border border-white/5 rounded-bl-md'
+                : 'bg-gray-100 text-gray-900 rounded-bl-md'
+        }`}>
+          {isBot && <p className={`text-[8px] font-bold uppercase tracking-wide mb-1 ${darkMode ? 'text-[#E5C158]' : 'text-[#9A761F]'}`}>🤖 Quick Assistant</p>}
+          {message.text && <p className="text-xs whitespace-pre-wrap break-words">{message.text}</p>}
+          {message.product && renderProductCard(message.product, true)}
+          {message.attachment && renderAttachment(message.attachment)}
+          <div className={`text-[8px] mt-1 text-right ${isMine ? 'text-black/60' : 'text-gray-500'}`}>{formatTime(message.createdAt)}</div>
+        </div>
+      </div>
+    );
   };
 
-  const activeChatLogs = activeSession ? (currentChatData[activeSession] || []) : [];
-
-  return (
-    <div className="fixed bottom-6 right-6 z-50 font-sans">
-      
-      {/* FLOATING CHAT BUTTON WITH UNREAD BADGE */}
-      {!isOpen && (
-        <button 
-          onClick={() => { setIsOpen(true); setUnreadCount(0); }}
-          className="relative bg-[#BA963E] hover:bg-[#E5C158] text-black font-bold p-4 rounded-full shadow-2xl transition-all cursor-pointer flex items-center justify-center text-lg"
-        >
-          💬
-          {unreadCount > 0 && (
-            <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center animate-bounce border-2 border-black">
-              {unreadCount}
-            </span>
-          )}
-        </button>
-      )}
-
-      {/* CHAT WINDOW */}
-      {isOpen && (
-        <div className={`w-[360px] sm:w-[400px] h-[540px] rounded-3xl border shadow-2xl flex flex-col overflow-hidden ${
-          darkMode ? 'bg-[#121214] border-white/10 text-white' : 'bg-[#121214] border-white/10 text-white'
-        }`}>
-          
-          {/* HEADER */}
-          <div className="bg-gradient-to-r from-[#1A1A1D] to-black p-4 border-b border-white/5 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-              </span>
-              <div>
-                <h3 className="text-xs tracking-widest text-[#E5C158] font-bold uppercase">💬 MA Store Live App Desk</h3>
-                <p className="text-[10px] text-gray-400">{isAdmin ? "⚡ Operational Console" : "🔒 End-to-End Encryption"}</p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {isAdmin && activeSession && (
-                <button 
-                  onClick={handleResolveIssue}
-                  className="bg-emerald-600/20 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-600 hover:text-white px-2 py-1 rounded-lg text-[9px] font-bold cursor-pointer"
-                >
-                  ✓ Resolve
-                </button>
-              )}
-              <button onClick={() => { setIsOpen(false); if(onClose) onClose(); }} className="text-gray-400 hover:text-white text-sm bg-white/5 w-7 h-7 flex items-center justify-center rounded-full cursor-pointer">✕</button>
-            </div>
-          </div>
-
-          {/* BODY ROUTER */}
-          {isAdmin ? (
-            <div className="flex-1 flex flex-col bg-[#17171A] overflow-hidden">
-              {!activeSession ? (
-                /* ADMIN LIST */
-                <div className="flex-1 flex flex-col overflow-hidden">
-                  <div className="p-2.5 bg-black/40 border-b border-white/5">
-                    <input type="text" placeholder="🔍 Search active streams..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-[#1A1A1D] border border-white/10 rounded-xl p-2 text-[11px] text-white focus:outline-none" />
-                  </div>
-                  <div className="flex-1 overflow-y-auto divide-y divide-white/5">
-                    {sessionsList.length === 0 ? (
-                      <p className="text-center text-gray-500 text-xs p-6">No active unresolved chats.</p>
-                    ) : (
-                      sessionsList.map((name) => (
-                        <div key={name} onClick={() => handleOpenChat(name)} className="p-4 cursor-pointer hover:bg-white/[0.04] flex justify-between items-center">
-                          <p className="text-xs font-bold text-[#E5C158]">{name}</p>
-                          <span className="bg-white/5 text-gray-400 text-[10px] px-2 py-0.5 rounded-full">{currentChatData[name]?.length || 0}</span>
-                        </div>
-                      ))
-                    )}
-                  </div>
+  if (!isOpen) return null;
+ 
+  // --------------------------------------------------------------------------
+  // ADMIN INBOX
+  // --------------------------------------------------------------------------
+  const renderAdmin = () => (
+    <div className={`w-full h-[min(78vh,680px)] rounded-3xl border shadow-2xl overflow-hidden flex flex-col ${panelClass}`}>
+      <div className="bg-gradient-to-r from-[#BA963E] to-[#E5C158] text-black px-4 py-3 flex items-center justify-between">
+        <div>
+          <p className="font-black text-sm tracking-wide">CUSTOMER CHAT INBOX</p>
+          <p className="text-[9px] opacity-70">Live conversations • saved automatically</p>
+        </div>
+        <button onClick={onClose} className="text-black/70 hover:text-black text-lg font-bold cursor-pointer">✕</button>
+      </div>
+ 
+      <div className={`grid grid-cols-2 border-b ${darkMode ? 'border-white/10' : 'border-gray-200'}`}>
+        <button onClick={() => setAdminTab('active')} className={`py-2 text-[10px] font-bold ${adminTab === 'active' ? 'bg-[#BA963E] text-black' : 'opacity-70'}`}>Active Chats</button>
+        <button onClick={() => setAdminTab('resolved')} className={`py-2 text-[10px] font-bold ${adminTab === 'resolved' ? 'bg-[#BA963E] text-black' : 'opacity-70'}`}>Resolved</button>
+      </div>
+ 
+      <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[135px_1fr]">
+        <div className={`border-r ${darkMode ? 'border-white/10' : 'border-gray-200'} overflow-y-auto p-2 space-y-2`}>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className={`w-full rounded-xl border px-2 py-2 text-[9px] outline-none ${inputClass}`} />
+          {adminSessions.length === 0 ? (
+            <p className="text-[9px] text-gray-500 text-center py-6">No {adminTab} chats.</p>
+          ) : adminSessions.map(session => {
+            const last = getLastMessage(session);
+            const selected = activeSession?.id === session.id;
+            return (
+              <button key={session.id} onClick={() => openAdminSession(session.id)} className={`w-full text-left p-2 rounded-xl border transition-all cursor-pointer ${selected ? 'bg-[#BA963E]/20 border-[#BA963E]/50' : darkMode ? 'border-white/5 hover:bg-white/5' : 'border-gray-200 hover:bg-gray-50'}`}>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-7 h-7 rounded-full bg-[#BA963E] text-black flex items-center justify-center text-[10px] font-black">{String(session.customerName || 'C').slice(0, 1).toUpperCase()}</span>
+                  <span className="truncate text-[9px] font-bold">{session.customerName || 'Customer'}</span>
                 </div>
-              ) : (
-                /* ADMIN CHAT WINDOW */
-                <div className="flex-1 flex flex-col justify-between overflow-hidden">
-                  <div className="p-3 border-b border-white/5 bg-black/30 flex justify-between items-center px-4">
-                    <span className="text-xs font-bold text-white">{activeSession}</span>
-                    <button onClick={() => setActiveSession(null)} className="bg-white/5 text-gray-300 text-[10px] font-bold px-2.5 py-1.5 rounded-xl cursor-pointer">⬅️ Back</button>
-                  </div>
-
-                  <div className="flex-1 p-4 overflow-y-auto space-y-3 text-[11px]">
-                    {activeChatLogs.map((m, index) => {
-                      const isAdminMsg = m.sender?.toLowerCase() === 'admin';
-                      return (
-                        <div key={index} className={`flex flex-col ${isAdminMsg ? 'items-end' : 'items-start'}`}>
-                          <span className="text-[9px] text-gray-500 mb-0.5">{m.sender} • {m.timestamp}</span>
-                          <div className={`p-3 rounded-2xl max-w-[85%] space-y-1 whitespace-pre-wrap leading-relaxed ${
-                            m.isOrderMessage
-                              ? 'bg-[#1A1A1D] border border-[#BA963E]/40 text-[#E5C158] font-mono'
-                              : isAdminMsg
-                              ? 'bg-[#BA963E] text-black font-medium'
-                              : 'bg-[#26262B] text-white border border-white/10'
-                          }`}>
-                            {m.image && <img src={m.image} alt="Attachment" className="w-full max-h-36 object-cover rounded-xl mb-1" />}
-                            {m.text && <p>{m.text}</p>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    <div ref={chatEndRef} />
-                  </div>
-
-                  {/* MEDIA PREVIEW */}
-                  {selectedFile && (
-                    <div className="px-4 py-1.5 bg-black/40 border-t border-white/5 flex items-center justify-between">
-                      <img src={selectedFile} alt="Preview" className="w-7 h-7 object-cover rounded-md" />
-                      <button onClick={() => setSelectedFile(null)} className="text-red-400 text-xs font-bold cursor-pointer">✕</button>
-                    </div>
-                  )}
-
-                  <form onSubmit={dispatchMessage} className="p-3 bg-black/40 border-t border-white/5 flex gap-2 items-center">
-                    <label className="bg-white/5 hover:bg-white/10 p-2 rounded-xl border border-white/10 cursor-pointer">
-                      📸
-                      <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImageAttach} className="hidden" />
-                    </label>
-                    <input type="text" placeholder="Type message..." value={typedMessage} onChange={(e) => setTypedMessage(e.target.value)} className="flex-1 bg-[#1A1A1D] border border-white/5 text-white rounded-xl p-2.5 text-[11px] focus:outline-none" />
-                    <button type="submit" className="bg-[#BA963E] text-black px-4 py-2.5 rounded-xl text-[11px] font-bold cursor-pointer">Send</button>
-                  </form>
-                </div>
-              )}
+                <p className="text-[8px] opacity-50 mt-1 truncate">{getSessionPreview(session)}</p>
+                {last?.sender === 'customer' && session.unreadForAdmin > 0 && <span className="inline-flex mt-1 text-[8px] bg-red-500 text-white px-1.5 py-0.5 rounded-full">{session.unreadForAdmin}</span>}
+              </button>
+            );
+          })}
+        </div>
+ 
+        <div className="min-h-0 flex flex-col">
+          {!activeSession ? (
+            <div className="flex-1 flex items-center justify-center p-6 text-center">
+              <div><div className="text-4xl mb-2">💬</div><p className="text-sm font-bold">Select a customer chat</p><p className="text-[10px] opacity-50 mt-1">New customer messages appear in Active Chats.</p></div>
             </div>
           ) : (
-            /* CUSTOMER VIEW */
-            <div className="flex-1 flex flex-col justify-between bg-[#17171A] overflow-hidden">
-              {!isRegistered ? (
-                <form onSubmit={initCustomerSession} className="m-auto p-6 text-center space-y-4 w-full max-w-xs">
-                  <p className="text-xs text-gray-400">Please enter your name to initiate live support connection:</p>
-                  <input type="text" placeholder="Your Name" value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full bg-[#1A1A1D] border border-[#BA963E]/30 text-center p-3 rounded-xl text-xs text-white focus:outline-none" required />
-                  <button type="submit" className="w-full bg-[#BA963E] text-black font-bold py-2.5 rounded-xl text-xs uppercase cursor-pointer">Connect Terminal</button>
-                </form>
-              ) : (
-                <div className="flex-1 flex flex-col justify-between overflow-hidden">
-                  <div className="flex-1 p-4 overflow-y-auto space-y-2.5 text-[11px]">
-                    {activeChatLogs.length === 0 ? (
-                      <p className="text-center text-gray-500 my-auto">No messages yet. Try typing below or use Quick Questions!</p>
-                    ) : (
-                      activeChatLogs.map((m, index) => {
-                        const isCustomerMsg = m.sender?.toLowerCase() === 'customer';
-                        return (
-                          <div key={index} className={`flex flex-col ${isCustomerMsg ? 'items-end' : 'items-start'}`}>
-                            <span className="text-[9px] text-gray-500 mb-0.5">{m.sender} • {m.timestamp}</span>
-                            <div className={`p-2.5 rounded-2xl max-w-[85%] space-y-1 whitespace-pre-wrap leading-relaxed ${
-                              m.isOrderMessage
-                                ? 'bg-[#1A1A1D] border border-[#BA963E]/40 text-[#E5C158] font-mono'
-                                : isCustomerMsg
-                                ? 'bg-[#BA963E] text-black font-medium'
-                                : 'bg-[#26262B] text-white border border-white/10'
-                            }`}>
-                              {m.image && <img src={m.image} alt="Attachment" className="w-full max-h-36 object-cover rounded-xl mb-1" />}
-                              {m.text && <p>{m.text}</p>}
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                    <div ref={chatEndRef} />
-                  </div>
-
-                  {/* QUICK QUESTIONS */}
-                  <div className="p-2 bg-black/20 border-t border-white/5 space-y-1 px-3">
-                    <p className="text-[8px] text-gray-500 uppercase font-bold">Quick Questions:</p>
-                    <div className="flex gap-1.5 overflow-x-auto pb-1">
-                      {customerFAQs.map((faq, i) => (
-                        <button key={i} type="button" onClick={() => handleFAQClick(faq)} className="text-[9px] bg-[#BA963E]/10 text-[#E5C158] px-2.5 py-1.5 rounded-lg border border-[#BA963E]/20 whitespace-nowrap cursor-pointer">{faq.q}</button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* MEDIA PREVIEW */}
-                  {selectedFile && (
-                    <div className="px-4 py-1.5 bg-black/40 border-t border-white/5 flex items-center justify-between">
-                      <img src={selectedFile} alt="Preview" className="w-7 h-7 object-cover rounded-md" />
-                      <button onClick={() => setSelectedFile(null)} className="text-red-400 text-xs font-bold cursor-pointer">✕</button>
-                    </div>
-                  )}
-
-                  {/* CHAT INPUT */}
-                  <form onSubmit={dispatchMessage} className="p-3 bg-black/30 border-t border-white/5 flex gap-2 items-center">
-                    <label className="bg-white/5 hover:bg-white/10 p-2 rounded-xl border border-white/10 cursor-pointer">
-                      📸
-                      <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImageAttach} className="hidden" />
-                    </label>
-                    <input type="text" placeholder="Type message here..." value={typedMessage} onChange={(e) => setTypedMessage(e.target.value)} className="flex-1 bg-[#1A1A1D] border border-white/5 text-white rounded-xl p-2.5 text-[11px] focus:outline-none" />
-                    <button type="submit" className="bg-[#BA963E] text-black px-4 py-2.5 rounded-xl text-[11px] font-bold cursor-pointer">Send</button>
-                  </form>
+            <>
+              <div className={`px-3 py-2 border-b flex items-center justify-between ${darkMode ? 'border-white/10' : 'border-gray-200'}`}>
+                <div><p className="text-xs font-bold">{activeSession.customerName || 'Customer'}</p><p className="text-[8px] opacity-50">{activeSession.id} • {formatDate(activeSession.createdAt)}</p></div>
+                <div className="flex gap-1.5">
+                  {activeSession.status === 'open' ? <button onClick={() => resolveSession(activeSession.id)} className="px-2.5 py-1.5 bg-emerald-500 text-black rounded-lg text-[9px] font-bold cursor-pointer">✓ Resolve</button> : <button onClick={() => reopenSession(activeSession.id)} className="px-2.5 py-1.5 bg-[#BA963E] text-black rounded-lg text-[9px] font-bold cursor-pointer">Re-open</button>}
+                  <button onClick={onClose} className="px-2 py-1.5 bg-white/5 rounded-lg text-[9px] cursor-pointer">✕</button>
                 </div>
-              )}
-            </div>
+              </div>
+ 
+              <div className="flex-1 overflow-y-auto p-3">
+                {(activeSession.messages || []).map(renderMessage)}
+                <div ref={messagesEndRef} />
+              </div>
+ 
+              {activeSession.status === 'open' && renderComposer()}
+            </>
           )}
-
         </div>
-      )}
+      </div>
     </div>
   );
+ 
+  // --------------------------------------------------------------------------
+  // COMPOSER
+  // --------------------------------------------------------------------------
+  function renderComposer() {
+    return (
+      <div className={`border-t p-2 ${darkMode ? 'border-white/10 bg-[#0C0C0D]' : 'border-gray-200 bg-white'}`}>
+        {(selectedFile || selectedProduct) && (
+          <div className="mb-2 flex items-center gap-2 p-2 rounded-xl bg-white/5 border border-white/10">
+            {selectedFile?.kind === 'image' && <img src={selectedFile.dataUrl} alt="Attachment" className="w-10 h-10 object-cover rounded-lg" />}
+            {selectedFile?.kind === 'video' && <span className="w-10 h-10 rounded-lg bg-black/40 flex items-center justify-center">🎬</span>}
+            {selectedProduct && <div className="w-10 h-10 rounded-lg overflow-hidden">{selectedProduct.image && <img src={selectedProduct.image} alt="" className="w-full h-full object-cover" />}</div>}
+            <div className="min-w-0 flex-1"><p className="text-[9px] font-bold truncate">{selectedFile?.name || selectedProduct?.name}</p><p className="text-[8px] opacity-50">Ready to send</p></div>
+            <button onClick={clearAttachments} className="text-xs opacity-60 hover:opacity-100 cursor-pointer">✕</button>
+          </div>
+        )}
+ 
+        {isAttachmentMenuOpen && (
+          <div className={`mb-2 flex flex-wrap gap-2 p-2 rounded-xl border ${darkMode ? 'border-white/10 bg-[#171719]' : 'border-gray-200 bg-gray-50'}`}>
+            <label className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-[9px] font-bold cursor-pointer hover:bg-[#BA963E] hover:text-black">
+              📷 Image / Video
+              <input type="file" accept="image/*,video/*" onChange={handleFileSelected} className="hidden" />
+            </label>
+            <button onClick={() => { setIsProductPickerOpen(true); setIsAttachmentMenuOpen(false); }} className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-[9px] font-bold cursor-pointer hover:bg-[#BA963E] hover:text-black">🛍️ Share Product</button>
+          </div>
+        )}
+ 
+        {isProductPickerOpen && (
+          <div className={`mb-2 max-h-44 overflow-y-auto rounded-xl border p-2 ${darkMode ? 'border-white/10 bg-[#171719]' : 'border-gray-200 bg-gray-50'}`}>
+            <div className="flex justify-between items-center mb-2"><span className="text-[9px] font-bold">Select a product</span><button onClick={() => setIsProductPickerOpen(false)} className="text-[10px] cursor-pointer">✕</button></div>
+            <div className="grid grid-cols-2 gap-2">
+              {productOptions.map(product => (
+                <button key={product.id} onClick={() => chooseProduct(product)} className="text-left p-1.5 rounded-lg border border-white/10 hover:border-[#BA963E] cursor-pointer">
+                  <div className="flex gap-2 items-center">{product.image && <img src={product.image} alt="" className="w-8 h-8 rounded-md object-cover" />}<span className="text-[8px] font-bold line-clamp-2">{product.name}</span></div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+ 
+        {isFaqMenuOpen && (
+          <div className={`mb-2 rounded-2xl border p-2 ${darkMode ? 'border-[#BA963E]/30 bg-[#171719]' : 'border-amber-200 bg-amber-50'}`}>
+            <div className="flex items-center justify-between mb-1.5">
+              <span className={`text-[9px] font-bold uppercase tracking-wide ${darkMode ? 'text-[#E5C158]' : 'text-[#9A761F]'}`}>
+                🤖 Quick Questions
+              </span>
+              <button
+                onClick={() => setIsFaqMenuOpen(false)}
+                className="text-[9px] opacity-60 hover:opacity-100 cursor-pointer"
+              >
+                Hide
+              </button>
+            </div>
+            <div className="space-y-1 max-h-36 overflow-y-auto">
+              {(roboticQuestions || []).map((question) => (
+                <button
+                  key={question}
+                  onClick={() => askQuickQuestion(question)}
+                  className={`w-full text-left px-2.5 py-2 rounded-xl border text-[9px] font-medium transition-colors cursor-pointer ${
+                    darkMode
+                      ? 'bg-white/5 border-white/10 text-gray-200 hover:bg-[#BA963E]/20 hover:border-[#BA963E]/40'
+                      : 'bg-white border-amber-200 text-gray-800 hover:bg-amber-100'
+                  }`}
+                >
+                  {question}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-end gap-2">
+          <button
+            onClick={() => {
+              setIsFaqMenuOpen(open => !open);
+              setIsAttachmentMenuOpen(false);
+              setIsProductPickerOpen(false);
+            }}
+            className={`w-9 h-9 rounded-full border flex items-center justify-center text-sm cursor-pointer transition-colors ${
+              isFaqMenuOpen
+                ? 'bg-[#BA963E] text-black border-[#BA963E]'
+                : 'bg-white/5 border-white/10 hover:bg-[#BA963E] hover:text-black'
+            }`}
+            title="Quick Questions"
+            aria-label="Open quick questions"
+          >
+            ＋
+          </button>
+          <button
+            onClick={() => {
+              setIsAttachmentMenuOpen(open => !open);
+              setIsFaqMenuOpen(false);
+              setIsProductPickerOpen(false);
+            }}
+            className="w-9 h-9 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-sm cursor-pointer hover:bg-[#BA963E] hover:text-black"
+            title="Attachments"
+            aria-label="Open attachments"
+          >
+            📎
+          </button>
+          <textarea value={messageText} onChange={(e) => setMessageText(e.target.value)} onKeyDown={handleComposerKeyDown} rows={1} placeholder="Type a message..." className={`flex-1 resize-none rounded-2xl border px-3 py-2 text-xs outline-none focus:border-[#BA963E] ${inputClass}`} />
+          <button disabled={isSending} onClick={sendMessage} className="w-9 h-9 rounded-full bg-[#BA963E] text-black flex items-center justify-center font-black cursor-pointer disabled:opacity-50">➤</button>
+        </div>
+        <div className="flex justify-between px-1 pt-1"><span className="text-[7px] opacity-40">Enter to send • Shift+Enter for new line</span>{isSending && <span className="text-[7px] opacity-50">Preparing attachment…</span>}</div>
+      </div>
+    );
+  }
+ 
+  // --------------------------------------------------------------------------
+  // CUSTOMER CHAT
+  // --------------------------------------------------------------------------
+  const renderCustomer = () => {
+    const session = activeSession;
+    return (
+      <div className={`w-full h-[min(78vh,680px)] rounded-3xl border shadow-2xl overflow-hidden flex flex-col ${panelClass}`}>
+        <div className="bg-gradient-to-r from-[#BA963E] to-[#E5C158] text-black px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-9 h-9 rounded-full bg-black/10 flex items-center justify-center font-black">MA</div>
+            <div><p className="font-black text-sm">Live Support</p><p className="text-[9px] opacity-70">We usually reply quickly</p></div>
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={() => setShowCustomerNameEditor(v => !v)} className="text-[9px] font-bold px-2 py-1 rounded-lg bg-black/10 cursor-pointer">{customerName}</button>
+            <button onClick={onClose} className="text-black/70 hover:text-black text-lg font-bold cursor-pointer">✕</button>
+          </div>
+        </div>
+ 
+        {showCustomerNameEditor && (
+          <div className="p-2 border-b border-white/10 flex gap-2">
+            <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} className={`flex-1 border rounded-xl px-2 py-1.5 text-[10px] outline-none ${inputClass}`} placeholder="Your name" />
+            <button onClick={saveCustomerName} className="px-3 py-1.5 rounded-xl bg-[#BA963E] text-black text-[9px] font-bold cursor-pointer">Save</button>
+          </div>
+        )}
+ 
+        {!session ? (
+          <div className="flex-1 flex items-center justify-center p-6 text-center">
+            <div>
+              <div className="text-5xl mb-3">💬</div>
+              <h3 className="font-bold text-sm">Chat with our support team</h3>
+              <p className="text-[10px] opacity-50 mt-2 max-w-[260px]">Ask about an order, product, delivery, payment, return, or any issue.</p>
+              <button onClick={ensureCustomerSession} className="mt-4 px-5 py-2.5 rounded-xl bg-[#BA963E] text-black text-xs font-bold cursor-pointer">Start Chat</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="px-3 py-2 border-b border-white/10 flex justify-between items-center">
+              <div><p className="text-[10px] font-bold">Support conversation</p><p className="text-[8px] opacity-50">#{session.id}</p></div>
+              {session.status === 'resolved' && <span className="text-[8px] px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Resolved</span>}
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {(session.messages || []).map(renderMessage)}
+              <div ref={messagesEndRef} />
+            </div>
+            {session.status === 'open' ? renderComposer() : (
+              <div className="p-3 border-t border-white/10 text-center">
+                <p className="text-[9px] opacity-50 mb-2">This conversation is resolved and has been removed from the active support queue.</p>
+                <button onClick={() => { setActiveSessionId(null); ensureCustomerSession(); }} className="px-4 py-2 rounded-xl bg-[#BA963E] text-black text-[10px] font-bold cursor-pointer">Start New Conversation</button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+ 
+  return isAdmin ? renderAdmin() : renderCustomer();
 }

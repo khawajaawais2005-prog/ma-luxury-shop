@@ -1,7 +1,24 @@
 import React, { useState, useEffect } from 'react';
 
 export default function AdminDashboard({
-  products, setProducts, bankDetails, setBankDetails, adminPassword, setAdminPassword, companyAddress, setCompanyAddress, addNotification
+  products,
+  setProducts,
+  bankDetails,
+  setBankDetails,
+  adminPassword,
+  setAdminPassword,
+  companyAddress,
+  setCompanyAddress,
+  addNotification,
+  notificationHistory = [],
+  freeDeliveryAuthorityEnabled = false,
+  onToggleFreeDeliveryAuthority,
+  orders: parentOrders = [],
+  orderHistory = [],
+  onPaymentVerification,
+  onToggleOrderFreeDelivery,
+  forceLightMode = false,
+  onOpenLiveChat
 }) {
   const [activeTab, setActiveTab] = useState('all');
 
@@ -13,13 +30,6 @@ export default function AdminDashboard({
     ];
   });
 
-  // 2. LIVE COMPLAINTS SYNC WITH LOCALSTORAGE
-  const [complaints, setComplaints] = useState(() => {
-    const saved = localStorage.getItem('ma_customer_complaints');
-    return saved ? JSON.parse(saved) : [
-      { id: "TKT-4412", orderId: "ORD-9821", issueType: "Delayed Shipment", description: "Package status hasn't updated since yesterday.", date: "2026-08-14", status: "Pending", email: "customer@gmail.com" }
-    ];
-  });
 
   // REAL-TIME MULTI-TAB SYNC & AUDIO ALERT
   useEffect(() => {
@@ -64,9 +74,6 @@ export default function AdminDashboard({
     localStorage.setItem('ma_customer_orders', JSON.stringify(orders));
   }, [orders]);
 
-  useEffect(() => {
-    localStorage.setItem('ma_customer_complaints', JSON.stringify(complaints));
-  }, [complaints]);
 
   // Handle Order Status Update
   const handleOrderStatusChange = (orderId, newStatus) => {
@@ -111,13 +118,6 @@ export default function AdminDashboard({
     if (addNotification) addNotification("■ Export Complete", "Orders downloaded as CSV.", "info");
   };
 
-  // Handle Complaint/Ticket Status Update
-  const handleComplaintStatusChange = (ticketId, newStatus) => {
-    setComplaints(prev => prev.map(c => c.id === ticketId ? { ...c, status: newStatus } : c));
-    if (addNotification) {
-      addNotification("■■ Complaint Status Saved", `Ticket #${ticketId} updated to [${newStatus}]`, "info");
-    }
-  };
 
   // NEW PRODUCT STATE WITH MULTI-IMAGE, SIZES, COLORS & STORE ADDRESS
   const [newProduct, setNewProduct] = useState({
@@ -135,15 +135,35 @@ export default function AdminDashboard({
   const [tempPassword, setTempPassword] = useState('');
 
   // MULTIPLE IMAGES UPLOAD HANDLER
+  // Data URLs are intentionally used instead of temporary blob URLs so the
+  // gallery survives a page refresh when the catalogue is saved to localStorage.
   const handleMultipleImageUpload = (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length > 0) {
-      const newUrls = files.map(file => URL.createObjectURL(file));
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const imageFiles = files.filter(file => file.type.startsWith('image/'));
+    if (imageFiles.length !== files.length) {
+      alert('Only image files can be added to the product gallery.');
+    }
+
+    const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+    const acceptedFiles = imageFiles.filter(file => file.size <= MAX_IMAGE_SIZE);
+    if (acceptedFiles.length !== imageFiles.length) {
+      alert('Images larger than 5MB were skipped.');
+    }
+
+    Promise.all(acceptedFiles.map(file => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    }))).then(newUrls => {
       setNewProduct(prev => ({
         ...prev,
-        images: [...prev.images, ...newUrls]
+        images: [...prev.images, ...newUrls.filter(Boolean)]
       }));
-    }
+      e.target.value = '';
+    }).catch(() => alert('One or more gallery images could not be read.'));
   };
 
   const removeSelectedImage = (indexToRemove) => {
@@ -257,6 +277,17 @@ export default function AdminDashboard({
     }
   };
 
+  // NEW PRODUCT FEATURE: COPY PUBLIC PRODUCT LINK FROM ADMIN INVENTORY
+  const handleCopyProductLink = async (product) => {
+    const productUrl = `${window.location.origin}/product/${encodeURIComponent(product.id)}`;
+    try {
+      await navigator.clipboard?.writeText(productUrl);
+      if (addNotification) addNotification('🔗 Product Link Copied', `${product.name} public link copied.`, 'info');
+    } catch {
+      window.prompt('Copy this product link:', productUrl);
+    }
+  };
+
   const handlePasswordUpdate = (e) => {
     e.preventDefault();
     if (!tempPassword.trim()) {
@@ -280,10 +311,16 @@ export default function AdminDashboard({
   });
 
   const totalRevenue = orders.reduce((acc, curr) => acc + (Number(curr.total) || 0), 0);
-  const pendingComplaintsCount = complaints.filter(c => c.status === 'Pending').length;
 
   return (
-    <div className="space-y-8 animate-in fade-in text-xs">
+    <div className={`space-y-8 animate-in fade-in text-xs ${forceLightMode ? 'ma-admin-light' : ''}`}>
+      {forceLightMode && <style>{`
+        .ma-admin-light .bg\[\#121214\], .ma-admin-light .bg\[\#1A1A1D\], .ma-admin-light .bg-black\/20, .ma-admin-light .bg-black\/40 { background-color:#ffffff !important; color:#171717 !important; border-color:#e5e7eb !important; }
+        .ma-admin-light .text-white, .ma-admin-light .text-gray-200, .ma-admin-light .text-gray-300 { color:#171717 !important; }
+        .ma-admin-light .text-gray-400, .ma-admin-light .text-gray-500 { color:#4b5563 !important; }
+        .ma-admin-light .border-white\/5, .ma-admin-light .border-white\/10 { border-color:#e5e7eb !important; }
+        .ma-admin-light input, .ma-admin-light select { background-color:#ffffff !important; color:#171717 !important; border-color:#d1d5db !important; }
+      `}</style>}
       <div>
         <h1 className="text-2xl font-serif text-[#E5C158]">Global Administration Master Terminal</h1>
         <p className="text-xs text-gray-500">Manage products, orders tracking, customer tickets & store security.</p>
@@ -305,12 +342,12 @@ export default function AdminDashboard({
           </div>
           <span className="text-2xl">■</span>
         </div>
-        <div className="bg-[#121214] border border-red-500/30 p-4 rounded-2xl flex justify-between items-center shadow-lg">
+        <div className="bg-[#121214] border border-emerald-500/30 p-4 rounded-2xl flex justify-between items-center shadow-lg">
           <div>
-            <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Pending Support Tickets</p>
-            <p className="text-xl font-bold text-red-400">{pendingComplaintsCount} <span className="text-xs text-red-300">Open</span></p>
+            <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Free Delivery Authority</p>
+            <p className={`text-xl font-bold ${freeDeliveryAuthorityEnabled ? 'text-emerald-400' : 'text-red-400'}`}>{freeDeliveryAuthorityEnabled ? 'ON' : 'OFF'}</p>
           </div>
-          <span className="text-2xl">■■</span>
+          <span className="text-2xl">🚚</span>
         </div>
       </div>
 
@@ -322,11 +359,11 @@ export default function AdminDashboard({
         <button onClick={() => setActiveTab('orders')} className={`px-4 py-2 rounded-xl font-bold transition-all ${activeTab === 'orders' ? 'bg-[#BA963E] text-black' : 'bg-white/5 text-gray-400'}`}>
           ■ Express Orders ({orders.length})
         </button>
-        <button onClick={() => setActiveTab('complaints')} className={`px-4 py-2 rounded-xl font-bold transition-all ${activeTab === 'complaints' ? 'bg-[#BA963E] text-black' : 'bg-white/5 text-gray-400'}`}>
-          ■■ Support Complaints ({complaints.length})
-        </button>
         <button onClick={() => setActiveTab('inventory')} className={`px-4 py-2 rounded-xl font-bold transition-all ${activeTab === 'inventory' ? 'bg-[#BA963E] text-black' : 'bg-white/5 text-gray-400'}`}>
           ■ Catalog & Controls
+        </button>
+        <button onClick={() => setActiveTab('operations')} className={`px-4 py-2 rounded-xl font-bold transition-all ${activeTab === 'operations' ? 'bg-[#BA963E] text-black' : 'bg-white/5 text-gray-400'}`}>
+          🚚 Operations & History
         </button>
       </div>
 
@@ -431,50 +468,6 @@ export default function AdminDashboard({
         </div>
       )}
 
-      {/* SUPPORT COMPLAINTS SECTION */}
-      {(activeTab === 'all' || activeTab === 'complaints') && (
-        <div className="bg-[#121214] p-5 rounded-3xl border border-red-500/20 space-y-4 shadow-xl">
-          <h2 className="text-sm uppercase tracking-wider text-[#E5C158] font-bold border-b border-white/5 pb-2 flex justify-between items-center">
-            <span>■■ Customer Complaints & Resolution Desk</span>
-            <span className="text-[10px] bg-red-500/10 text-red-400 px-2.5 py-1 rounded-full border border-red-500/20">{complaints.length} Tickets</span>
-          </h2>
-          <div className="space-y-3">
-            {complaints.map((ticket) => (
-              <div key={ticket.id} className="bg-[#1A1A1D] p-4 rounded-2xl border border-white/5 space-y-3">
-                <div className="flex justify-between items-center border-b border-white/5 pb-2">
-                  <div>
-                    <span className="font-mono text-[#E5C158] font-bold">Ticket #{ticket.id}</span>
-                    <span className="text-gray-500 text-[10px] block">Order Ref: {ticket.orderId}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-gray-400 text-[10px]">Action Status:</span>
-                    <select
-                      value={ticket.status}
-                      onChange={(e) => handleComplaintStatusChange(ticket.id, e.target.value)}
-                      className={`border text-xs rounded-xl p-1.5 font-bold focus:outline-none ${
-                        ticket.status === 'Resolved (OK)' ? 'bg-emerald-950/60 border-emerald-500 text-emerald-400' : 'bg-[#121214] border-red-500/40 text-amber-400'
-                      }`}
-                    >
-                      <option value="Pending">■ Pending Review</option>
-                      <option value="Under Investigation">■ Under Investigation</option>
-                      <option value="Resolved (OK)">■ Resolved (OK)</option>
-                      <option value="Closed">■ Closed</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <p className="font-bold text-white">{ticket.issueType}</p>
-                  <p className="text-gray-400 mt-1">{ticket.description}</p>
-                </div>
-                <div className="text-[10px] text-gray-500 flex justify-between pt-1 border-t border-white/5">
-                  <span>Customer Contact: {ticket.email || 'N/A'}</span>
-                  <span>Date Submitted: {ticket.date}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* SECURITY ACCESS KEY SECTION */}
       {(activeTab === 'all' || activeTab === 'inventory') && (
@@ -680,9 +673,14 @@ export default function AdminDashboard({
                         </button>
                       </td>
                       <td className="py-3 text-center">
-                        <button onClick={() => handleDeleteProduct(p.id, p.name)} className="text-red-500 hover:bg-red-500/10 border border-red-500/20 px-2 py-1 rounded-lg font-bold uppercase text-[10px]">
-                          Delete
-                        </button>
+                        <div className="flex flex-wrap justify-center gap-1.5">
+                          <button onClick={() => handleCopyProductLink(p)} className="text-[#E5C158] hover:bg-[#BA963E]/20 border border-[#BA963E]/30 px-2 py-1 rounded-lg font-bold uppercase text-[10px]">
+                            🔗 Link
+                          </button>
+                          <button onClick={() => handleDeleteProduct(p.id, p.name)} className="text-red-500 hover:bg-red-500/10 border border-red-500/20 px-2 py-1 rounded-lg font-bold uppercase text-[10px]">
+                            Delete
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -693,7 +691,81 @@ export default function AdminDashboard({
         </>
       )}
 
-      {/* PAYMENT SCREENSHOT MODAL */}
+      {/* OPERATIONS / DELIVERY / NOTIFICATION HISTORY */}
+      {(activeTab === 'all' || activeTab === 'operations') && (
+        <div className="space-y-5">
+          <div className="bg-[#121214] p-5 rounded-3xl border border-[#BA963E]/30 space-y-4 shadow-xl">
+            <div className="flex flex-col md:flex-row justify-between md:items-center gap-3">
+              <div>
+                <h2 className="text-sm uppercase tracking-wider text-[#E5C158] font-bold">🚚 Delivery Authority Control</h2>
+                <p className="text-[10px] text-gray-500 mt-1">Global permission first, then individual order overrides. Existing order records are not silently rewritten.</p>
+              </div>
+              <button onClick={onToggleFreeDeliveryAuthority} className={`px-4 py-2 rounded-xl font-bold text-xs ${freeDeliveryAuthorityEnabled ? 'bg-emerald-600 text-white' : 'bg-red-600/20 text-red-300 border border-red-500/30'}`}>
+                {freeDeliveryAuthorityEnabled ? '✓ AUTHORITY ON' : '🔒 AUTHORITY OFF'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div className="bg-[#1A1A1D] rounded-2xl border border-white/5 p-4">
+                <h3 className="font-bold text-xs text-[#E5C158] mb-2">Live Delivery Audit</h3>
+                <div className="space-y-2 max-h-72 overflow-y-auto">
+                  {(parentOrders || orders).map(order => (
+                    <div key={order.id} className="border border-white/5 rounded-xl p-3 flex flex-col sm:flex-row justify-between gap-2">
+                      <div>
+                        <p className="font-mono font-bold text-xs">#{order.id}</p>
+                        <p className="text-[10px] text-gray-500">{order.freeDelivery ? 'FREE DELIVERY' : 'STANDARD DELIVERY'} • PKR {Number(order.deliveryFee || order.standardDeliveryFee || 0).toLocaleString()}</p>
+                        <p className="text-[9px] text-gray-600">{(order.trackingTimeline || []).filter(e => String(e.status || '').toLowerCase().includes('delivery')).length} delivery timeline event(s)</p>
+                      </div>
+                      <button disabled={!freeDeliveryAuthorityEnabled} onClick={() => onToggleOrderFreeDelivery?.(order.id)} className="px-3 py-2 rounded-xl bg-[#BA963E] text-black font-bold text-[10px] disabled:opacity-40">
+                        {order.freeDelivery ? 'Remove Free Delivery' : 'Grant Free Delivery'}
+                      </button>
+                    </div>
+                  ))}
+                  {!(parentOrders || orders).length && <p className="text-xs text-gray-500">No order delivery records yet.</p>}
+                </div>
+              </div>
+
+              <div className="bg-[#1A1A1D] rounded-2xl border border-white/5 p-4">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="font-bold text-xs text-[#E5C158]">🔔 Notification History</h3>
+                  <span className="text-[9px] text-gray-500">{notificationHistory.length} saved</span>
+                </div>
+                <div className="space-y-2 max-h-72 overflow-y-auto">
+                  {notificationHistory.length ? notificationHistory.slice(0, 100).map(note => (
+                    <div key={note.id} className="border border-white/5 rounded-xl p-2.5">
+                      <div className="flex justify-between gap-2"><b className="text-[10px]">{note.title}</b><span className="text-[8px] text-gray-500">{note.time}</span></div>
+                      <p className="text-[9px] text-gray-500 mt-1">{note.message}</p>
+                    </div>
+                  )) : <p className="text-xs text-gray-500">No notification history yet.</p>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-[#121214] p-5 rounded-3xl border border-white/5 shadow-xl">
+            <h2 className="text-sm uppercase tracking-wider text-[#E5C158] font-bold mb-3">🧾 Completed Order Archive</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs min-w-[720px]">
+                <thead><tr className="border-b border-white/10 text-gray-500"><th className="py-2">Order</th><th className="py-2">Customer</th><th className="py-2">Status</th><th className="py-2">Delivery</th><th className="py-2">Total</th></tr></thead>
+                <tbody className="divide-y divide-white/5">
+                  {(orderHistory || []).map(order => (
+                    <tr key={order.id}><td className="py-2 font-mono">{order.id}</td><td className="py-2">{order.customerName || order.customer?.fullName || 'Customer'}</td><td className="py-2">{order.status}</td><td className="py-2">{order.freeDelivery ? 'FREE' : `PKR ${Number(order.deliveryFee || order.standardDeliveryFee || 0).toLocaleString()}`}</td><td className="py-2 font-mono text-[#E5C158]">PKR {Number(order.total || 0).toLocaleString()}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+              {!orderHistory?.length && <p className="text-xs text-gray-500 py-5 text-center">No completed orders archived yet.</p>}
+            </div>
+          </div>
+
+          <div className="bg-[#121214] p-5 rounded-3xl border border-white/5 shadow-xl">
+            <h2 className="text-sm uppercase tracking-wider text-[#E5C158] font-bold mb-3">💬 Support Connection</h2>
+            <p className="text-[10px] text-gray-500 mb-3">Customer complaints/tickets are intentionally not used. Customers communicate through Live Support, and resolved conversations leave the active queue.</p>
+            <button onClick={onOpenLiveChat} className="bg-[#BA963E] text-black font-bold px-4 py-2 rounded-xl text-xs">Open Live Support</button>
+          </div>
+        </div>
+      )}
+
+            {/* PAYMENT SCREENSHOT MODAL */}
       {viewScreenshot && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div className="bg-[#121214] border border-[#BA963E]/40 w-full max-w-lg p-5 rounded-3xl space-y-4 shadow-2xl text-white">
